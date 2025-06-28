@@ -2,7 +2,7 @@ import asyncio
 from aiohttp import web, WSMsgType
 
 clients = set()
-clients_lock = asyncio.Lock()  # Use a lock for robust concurrent set modifications
+clients_lock = asyncio.Lock()
 
 async def websocket_handler(request):
     ws = web.WebSocketResponse(max_msg_size=2**24)
@@ -14,7 +14,7 @@ async def websocket_handler(request):
     try:
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
-                # Broadcast to all except sender
+                # Only relay *live* audio, never buffer or resend old
                 to_remove = []
                 async with clients_lock:
                     for client in clients:
@@ -27,7 +27,6 @@ async def websocket_handler(request):
                     for client in to_remove:
                         clients.discard(client)
             elif msg.type == WSMsgType.TEXT:
-                # Relay text as well
                 text_data = msg.data.encode("utf-8")
                 to_remove = []
                 async with clients_lock:
