@@ -1,30 +1,45 @@
-import os
+import asyncio
 from aiohttp import web
 
-connected = set()
+clients = set()
 
 async def websocket_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
-    connected.add(ws)
+    clients.add(ws)
+    print(f"New client connected: {request.remote}")
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.BINARY:
-                # Relay audio to all other connected clients
-                for client in connected:
-                    if client != ws:
-                        await client.send_bytes(msg.data)
+                disconnected_clients = set()
+                for client in list(clients):
+                    if client is not ws:
+                        try:
+                            await client.send_bytes(msg.data)
+                        except Exception as e:
+                            print(f"Removing client {client}: {e}")
+                            disconnected_clients.add(client)
+                clients.difference_update(disconnected_clients)
+            elif msg.type == web.WSMsgType.TEXT:
+                # Optionally, broadcast text to all other clients
+                disconnected_clients = set()
+                for client in list(clients):
+                    if client is not ws:
+                        try:
+                            await client.send_str(msg.data)
+                        except Exception as e:
+                            print(f"Removing client {client}: {e}")
+                            disconnected_clients.add(client)
+                clients.difference_update(disconnected_clients)
+            elif msg.type == web.WSMsgType.ERROR:
+                print(f"Connection error: {ws.exception()}")
     finally:
-        connected.remove(ws)
+        clients.discard(ws)
+        print(f"Client disconnected: {request.remote}")
     return ws
 
-async def health(request):
-    return web.Response(text="ok")
-
 app = web.Application()
-app.router.add_get("/", health)         # Health check endpoint
-app.router.add_get("/ws", websocket_handler)  # WebSocket endpoint
+app.router.add_get('/ws', websocket_handler)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    web.run_app(app, port=port)
+    web.run_app(app, port=8000)
