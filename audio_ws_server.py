@@ -1,45 +1,66 @@
 import asyncio
-from aiohttp import web
+from aiohttp import web, WSMsgType
 
 clients = set()
+clients_lock = asyncio.Lock()  # Use a lock for robust concurrent set modifications
 
 async def websocket_handler(request):
-    ws = web.WebSocketResponse()
+    ws = web.WebSocketResponse(max_msg_size=2**24)
     await ws.prepare(request)
-    clients.add(ws)
-    print(f"New client connected: {request.remote}")
+    async with clients_lock:
+        clients.add(ws)
+    print(f"[SERVER] New client connected: {request.remote} - Total: {len(clients)}")
+
     try:
         async for msg in ws:
-            if msg.type == web.WSMsgType.BINARY:
-                disconnected_clients = set()
-                for client in list(clients):
-                    if client is not ws:
-                        try:
-                            await client.send_bytes(msg.data)
-                        except Exception as e:
-                            print(f"Removing client {client}: {e}")
-                            disconnected_clients.add(client)
-                clients.difference_update(disconnected_clients)
-            elif msg.type == web.WSMsgType.TEXT:
-                # Optionally, broadcast text to all other clients
-                disconnected_clients = set()
-                for client in list(clients):
-                    if client is not ws:
-                        try:
-                            await client.send_str(msg.data)
-                        except Exception as e:
-                            print(f"Removing client {client}: {e}")
-                            disconnected_clients.add(client)
-                clients.difference_update(disconnected_clients)
-            elif msg.type == web.WSMsgType.ERROR:
-                print(f"Connection error: {ws.exception()}")
+            if msg.type == WSMsgType.BINARY:
+                # Broadcast to all except sender
+                to_remove = []
+                async with clients_lock:
+                    for client in clients:
+                        if client is not ws:
+                            try:
+                                await client.send_bytes(msg.data)
+                            except Exception as e:
+                                print(f"[SERVER] Removing client (send_bytes failed): {e}")
+                                to_remove.append(client)
+                    for client in to_remove:
+                        clients.discard(client)
+            elif msg.type == WSMsgType.TEXT:
+                # Relay text as well
+                text_data = msg.data.encode("utf-8")
+                to_remove = []
+                async with clients_lock:
+                    for client in clients:
+                        if client is not ws:
+                            try:
+                                await client.send_bytes(b"TEXT:" + text_data)
+                            except Exception as e:
+                                print(f"[SERVER] Removing client (send_str failed): {e}")
+                                to_remove.append(client)
+                    for client in to_remove:
+                        clients.discard(client)
+            elif msg.type == WSMsgType.ERROR:
+                print(f"[SERVER] Connection closed with exception: {ws.exception()}")
+                break
+    except Exception as e:
+        print(f"[SERVER] Handler exception: {e}")
     finally:
-        clients.discard(ws)
-        print(f"Client disconnected: {request.remote}")
+        async with clients_lock:
+            clients.discard(ws)
+        print(f"[SERVER] Client disconnected: {request.remote}, Total: {len(clients)}")
+        await ws.close()
     return ws
 
-app = web.Application()
-app.router.add_get('/ws', websocket_handler)
+async def health(request):
+    return web.Response(text="OK")
+
+def main():
+    app = web.Application()
+    app.router.add_get('/ws', websocket_handler)
+    app.router.add_get('/health', health)
+    print("[SERVER] Starting Audio WS Server on 0.0.0.0:8000 ...")
+    web.run_app(app, host="0.0.0.0", port=8000)
 
 if __name__ == "__main__":
-    web.run_app(app, port=8000)
+    main()
